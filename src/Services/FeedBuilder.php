@@ -143,12 +143,18 @@ class FeedBuilder {
     }
 
     /**
-     * Get GTIN/EAN from product meta or ACF field.
+     * Get GTIN/EAN - match google-product-feed: prefer sheet GTIN, then meta keys, then ACF.
      */
-    private function get_gtin(\WC_Product $p): string {
+    private function get_gtin(\WC_Product $p, array $sheet_row = []): string {
         $pid = $p->get_id();
         
-        // Try common meta keys first
+        // Prefer sheet GTIN first (match google-product-feed)
+        $gtin = trim( $this->row_get( $sheet_row, [ 'GTIN', 'gtin', 'ean', 'EAN code', 'ean code' ] ) );
+        if ( $gtin !== '' ) {
+            return $gtin;
+        }
+        
+        // Try common meta keys
         $meta_keys = [ 'gtin', '_wpm_gtin_code', '_alg_ean', '_ean', '_barcode', 'hwp_product_gtin' ];
         foreach ( $meta_keys as $key ) {
             $val = get_post_meta( $pid, $key, true );
@@ -159,9 +165,9 @@ class FeedBuilder {
         
         // Try ACF field
         if ( function_exists( 'get_field' ) ) {
-            $gtin = get_field( 'gtin', $pid );
-            if ( $gtin !== '' && $gtin !== null ) {
-                return trim( (string) $gtin );
+            $gtin_acf = get_field( 'gtin', $pid );
+            if ( $gtin_acf !== '' && $gtin_acf !== null ) {
+                return trim( (string) $gtin_acf );
             }
         }
         
@@ -264,16 +270,17 @@ class FeedBuilder {
     private function write_item(\XMLWriter $x, XmlHelper $h, \WC_Product $p, array $sheet_row = []): bool {
         $pid = $p->get_id();
         
-        // PRODUCTNAME: ACF seo_title with fallback to product name
-        $seo_title = function_exists('get_field') ? get_field('seo_title', $pid) : '';
-        $name = $seo_title !== '' ? trim((string) $seo_title) : $p->get_name();
+        // PRODUCTNAME: Match google-product-feed - prefer sheet SEO Title, then ACF seo_title, then product name
+        $seo_title_sheet = $this->row_get( $sheet_row, [ 'SEO Title', 'Seo Title', 'seo title' ] );
+        $seo_title_acf = function_exists('get_field') ? (string) get_field('seo_title', $pid) : '';
+        $name = $seo_title_sheet !== '' ? trim((string) $seo_title_sheet) : ($seo_title_acf !== '' ? trim((string) $seo_title_acf) : $p->get_name());
         
         $url    = get_permalink( $pid );
         $price  = $this->price_vat_integer( $p );  // PRICE_VAT (CZK, incl VAT) as integer
         $img    = $this->main_image( $p );
         $itemId = $this->item_id( $p );  // Product ID
         $catTxt = $this->category_text( $p );
-        $gtin   = $this->get_gtin( $p );
+        $gtin   = $this->get_gtin( $p, $sheet_row );
         $price_before = $this->regular_price_vat_integer( $p );  // PRICE_BEFORE_DISCOUNT
 
         if ( ! $name || ! $url || ! $img || ! $itemId ) {
