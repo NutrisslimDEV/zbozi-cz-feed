@@ -36,6 +36,12 @@ class AdminController {
         add_settings_field( 'decimal_rounding', __( 'PRICE_VAT rounding', 'zbozi-cz' ),
             [ $this, 'field_select' ], self::OPTION_KEY, 'general',
             [ 'id' => 'decimal_rounding', 'options' => [ 'round' => 'Round to integer (recommended)', 'ceil' => 'Ceil', 'floor' => 'Floor' ] ] );
+        
+        add_settings_section( 'sheet', __( 'Google Sheet', 'zbozi-cz' ), function() {
+            echo '<p>' . esc_html__( 'Publish your Google Sheet tab as CSV (File → Share → Publish to web → CSV) and paste the URL here. The sheet must have columns: ID, SKU, and "Show in feed" (yes/no). Products will be ordered by their position in the sheet.', 'zbozi-cz' ) . '</p>';
+        }, self::OPTION_KEY );
+        add_settings_field( 'sheet_csv_url', __( 'Google Sheet CSV URL', 'zbozi-cz' ),
+            [ $this, 'field_text' ], self::OPTION_KEY, 'sheet', [ 'id' => 'sheet_csv_url', 'placeholder' => 'https://docs.google.com/spreadsheets/d/…/pub?gid=…&single=true&output=csv' ] );
     }
 
     public function sanitize( $input ) {
@@ -46,6 +52,12 @@ class AdminController {
         if ( isset( $input['decimal_rounding'] ) ) {
             $val = (string) $input['decimal_rounding'];
             $out['decimal_rounding'] = in_array( $val, [ 'round','ceil','floor' ], true ) ? $val : 'round';
+        }
+        if ( isset( $input['sheet_csv_url'] ) ) {
+            $url = esc_url_raw( trim( (string) $input['sheet_csv_url'] ) );
+            $out['sheet_csv_url'] = $url;
+            // Clear cache when URL changes
+            delete_transient( ZBOZI_CZ_SHEET_TRANSIENT_KEY );
         }
         return $out;
     }
@@ -62,6 +74,13 @@ class AdminController {
     }
 
     public function render_settings_page() : void {
+        // Handle cache clear
+        if ( isset( $_GET['clear_cache'] ) && $_GET['clear_cache'] === '1' && current_user_can( 'manage_woocommerce' ) ) {
+            check_admin_referer( 'zbozi_cz_clear_cache' );
+            delete_transient( ZBOZI_CZ_SHEET_TRANSIENT_KEY );
+            echo '<div class="notice notice-success"><p>' . esc_html__( 'Cache cleared.', 'zbozi-cz' ) . '</p></div>';
+        }
+
         $upload = wp_get_upload_dir();
         $filename  = $this->feed_filename();
         $file_path = trailingslashit( $upload['basedir'] ) . $filename;
@@ -72,7 +91,7 @@ class AdminController {
         ?>
         <div class="wrap">
             <h1><?php esc_html_e( 'Zboží.cz XML Feed', 'zbozi-cz' ); ?></h1>
-            <p><?php esc_html_e( 'Generates an XML feed compatible with Zboží.cz.', 'zbozi-cz' ); ?></p>
+            <p><?php esc_html_e( 'Generates an XML feed compatible with Zboží.cz. Products are controlled via Google Sheet (ID, SKU, Show in feed columns).', 'zbozi-cz' ); ?></p>
 
             <table class="widefat striped" style="max-width:760px;margin-top:1em;">
                 <tbody>
@@ -97,6 +116,12 @@ class AdminController {
                 <button class="button button-primary"><?php esc_html_e( 'Generate feed now', 'zbozi-cz' ); ?></button>
             </form>
 
+            <p>
+                <a href="<?php echo esc_url( wp_nonce_url( add_query_arg( 'clear_cache', '1' ), 'zbozi_cz_clear_cache' ) ); ?>" class="button">
+                    <?php esc_html_e( 'Clear Sheet Cache', 'zbozi-cz' ); ?>
+                </a>
+            </p>
+
             <hr/>
             <form method="post" action="options.php" style="max-width:760px;">
                 <?php
@@ -112,6 +137,9 @@ class AdminController {
     public function generate_now() : void {
         if ( ! current_user_can( 'manage_woocommerce' ) ) { wp_die( 'Unauthorized' ); }
         check_admin_referer( 'zbozi_cz_generate' );
+
+        // Clear cache before generating to ensure fresh data
+        delete_transient( ZBOZI_CZ_SHEET_TRANSIENT_KEY );
 
         $builder = new FeedBuilder();
         $count   = $builder->build_and_save(); // returns item count or WP_Error

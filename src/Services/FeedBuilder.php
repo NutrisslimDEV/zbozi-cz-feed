@@ -136,11 +136,76 @@ class FeedBuilder {
     }
 
     private function item_id(\WC_Product $p): string {
-        $sku = $p->get_sku();
-        if ( $p->is_type('variation') ) {
-            return $sku ? ($sku . '-' . $p->get_id()) : ('VAR-' . $p->get_id());
+        // ITEM_ID should be the product ID
+        return (string) $p->get_id();
+    }
+
+    /**
+     * Get GTIN/EAN from product meta or ACF field.
+     */
+    private function get_gtin(\WC_Product $p): string {
+        $pid = $p->get_id();
+        
+        // Try common meta keys first
+        $meta_keys = [ 'gtin', '_wpm_gtin_code', '_alg_ean', '_ean', '_barcode', 'hwp_product_gtin' ];
+        foreach ( $meta_keys as $key ) {
+            $val = get_post_meta( $pid, $key, true );
+            if ( $val !== '' && $val !== null ) {
+                return trim( (string) $val );
+            }
         }
-        return $sku ?: (string) $p->get_id();
+        
+        // Try ACF field
+        if ( function_exists( 'get_field' ) ) {
+            $gtin = get_field( 'gtin', $pid );
+            if ( $gtin !== '' && $gtin !== null ) {
+                return trim( (string) $gtin );
+            }
+        }
+        
+        return '';
+    }
+
+    /**
+     * Get regular price with VAT as integer (for PRICE_BEFORE_DISCOUNT).
+     */
+    private function regular_price_vat_integer( \WC_Product $p ): int {
+        $raw = (float) $p->get_regular_price();
+        
+        if ( $raw <= 0 ) {
+            return 0;
+        }
+        
+        // If not taxable, just return rounded raw
+        if ( 'taxable' !== $p->get_tax_status() ) {
+            return $this->round_mode( $raw );
+        }
+        
+        // Default to Czechia for Sklik feed
+        $country   = strtoupper( (string) ( $this->opts['feed_country'] ?? 'CZ' ) );
+        $tax_class = $p->get_tax_class() ?: '';
+        
+        // Normalize to price EXCLUDING tax
+        $price_excl = wc_get_price_excluding_tax( $p, [ 'qty' => 1, 'price' => $raw ] );
+        
+        // Get CZ tax rates
+        $rates = \WC_Tax::find_rates( [
+            'country'   => $country,
+            'state'     => '',
+            'postcode'  => '',
+            'city'      => '',
+            'tax_class' => $tax_class,
+        ] );
+        
+        // Calculate incl. VAT
+        if ( ! empty( $rates ) ) {
+            $taxes = \WC_Tax::calc_tax( $price_excl, $rates, false );
+            $incl  = $price_excl + array_sum( $taxes );
+        } else {
+            $incl = wc_get_price_including_tax( $p, [ 'qty' => 1, 'price' => $raw ] );
+        }
+        
+        return $this->round_mode( $incl );
     }
 
     private function description(\WC_Product $p): string {
@@ -152,13 +217,19 @@ class FeedBuilder {
     }
 
     private function write_item(\XMLWriter $x, XmlHelper $h, \WC_Product $p): bool {
-        // Required fields per your sample
-        $name   = $p->get_name();
-        $url    = get_permalink( $p->get_id() );
+        $pid = $p->get_id();
+        
+        // PRODUCTNAME: ACF seo_title with fallback to product name
+        $seo_title = function_exists('get_field') ? get_field('seo_title', $pid) : '';
+        $name = $seo_title !== '' ? trim((string) $seo_title) : $p->get_name();
+        
+        $url    = get_permalink( $pid );
         $price  = $this->price_vat_integer( $p );  // PRICE_VAT (CZK, incl VAT) as integer
         $img    = $this->main_image( $p );
-        $itemId = $this->item_id( $p );
+        $itemId = $this->item_id( $p );  // Product ID
         $catTxt = $this->category_text( $p );
+        $gtin   = $this->get_gtin( $p );
+        $price_before = $this->regular_price_vat_integer( $p );  // PRICE_BEFORE_DISCOUNT
 
         if ( ! $name || ! $url || ! $img || ! $itemId ) {
             return false; // skip invalid
@@ -171,9 +242,13 @@ class FeedBuilder {
             $h->element_text( 'DESCRIPTION', $this->description( $p ) );
             $h->element_text( 'URL', $url );
             $h->element_text( 'PRICE_VAT', (string) $price );
+            $h->element_text( 'PRICE_BEFORE_DISCOUNT', (string) $price_before );
             $h->element_text( 'DELIVERY_DATE', (string) $delivery_days );
             $h->element_text( 'IMGURL', $img );
             $h->element_text( 'ITEM_ID', $itemId );
+            if ( $gtin !== '' ) {
+                $h->element_text( 'EAN', $gtin );
+            }
             $h->element_text( 'CATEGORYTEXT', $catTxt );
         $x->endElement(); // SHOPITEM
 

@@ -13,6 +13,8 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 define( 'ZBOZI_CZ_FEED_VERSION', '1.0.0' );
 define( 'ZBOZI_CZ_FEED_DIR', plugin_dir_path( __FILE__ ) );
 define( 'ZBOZI_CZ_FEED_URL', plugin_dir_url( __FILE__ ) );
+define( 'ZBOZI_CZ_SHEET_TRANSIENT_KEY', 'zbozi_cz_sheet_cache' );
+define( 'ZBOZI_CZ_SHEET_TRANSIENT_TTL', 10 * MINUTE_IN_SECONDS );
 
 // includes (no composer)
 require_once ZBOZI_CZ_FEED_DIR . 'src/Utils/XmlHelper.php';
