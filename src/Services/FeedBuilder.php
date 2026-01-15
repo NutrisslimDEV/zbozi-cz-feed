@@ -210,9 +210,14 @@ class FeedBuilder {
 
     private function description(\WC_Product $p): string {
         $pid = $p->get_id();
-        // Prefer SEO field if present (ACF), then short description, then excerpt/content
-        $seo = function_exists('get_field') ? ( get_field('seo_description', $pid) ?: '' ) : '';
-        $src = $seo !== '' ? $seo : ( $p->get_short_description() ?: get_post_field( 'post_excerpt', $pid, 'raw' ) ?: $p->get_description() );
+        // Match google-product-feed: prefer ACF seo_description, then fallback to post_content (stripped)
+        $seo_desc_acf = function_exists('get_field') ? (string) get_field('seo_description', $pid) : '';
+        if ( $seo_desc_acf !== '' ) {
+            $src = $seo_desc_acf;
+        } else {
+            // Fallback to post_content (stripped of tags)
+            $src = wp_strip_all_tags( get_post_field( 'post_content', $pid, 'raw' ) );
+        }
         return trim( wp_strip_all_tags( html_entity_decode( (string) $src ) ) );
     }
 
