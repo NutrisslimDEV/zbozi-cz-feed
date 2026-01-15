@@ -38,8 +38,10 @@ class FeedBuilder {
         $repo = new ProductRepository();
         $count = 0;
 
-        foreach ( $repo->all_products_generator() as $p ) {
-            if ( $this->write_item( $x, $helper, $p ) ) { $count++; }
+        foreach ( $repo->all_products_generator() as $item ) {
+            $p = $item['product'];
+            $sheet_row = $item['sheet_row'] ?? [];
+            if ( $this->write_item( $x, $helper, $p, $sheet_row ) ) { $count++; }
         }
 
         $x->endElement(); // SHOP
@@ -208,20 +210,58 @@ class FeedBuilder {
         return $this->round_mode( $incl );
     }
 
-    private function description(\WC_Product $p): string {
+    /**
+     * Case/space/underscore-insensitive column access from sheet row.
+     */
+    private function row_get( array $row, array $candidates ): string {
+        if ( empty( $row ) ) {
+            return '';
+        }
+
+        $norm = function( $s ) {
+            $s = strtolower( (string) $s );
+            $s = str_replace( [ "\xC2\xA0", "\x00\xA0" ], ' ', $s ); // non-breaking spaces
+            $s = preg_replace( '/\s+|_+/', ' ', $s );
+            return trim( $s );
+        };
+
+        // Build map of normalized header -> original header
+        $map = [];
+        foreach ( $row as $k => $_ ) {
+            $map[ $norm( $k ) ] = $k;
+        }
+
+        foreach ( $candidates as $want ) {
+            $key = $norm( $want );
+            if ( isset( $map[ $key ] ) ) {
+                $val = $row[ $map[ $key ] ];
+                return is_string( $val ) ? $val : (string) $val;
+            }
+        }
+
+        return '';
+    }
+
+    private function description(\WC_Product $p, array $sheet_row = []): string {
         $pid = $p->get_id();
-        // Match google-product-feed: prefer ACF seo_description, then fallback to post_content (stripped)
-        $seo_desc_acf = function_exists('get_field') ? (string) get_field('seo_description', $pid) : '';
-        if ( $seo_desc_acf !== '' ) {
-            $src = $seo_desc_acf;
+        
+        // Match google-product-feed: prefer sheet Description, then ACF seo_description, then post_content
+        $desc_sheet = $this->row_get( $sheet_row, [ 'Description', 'description' ] );
+        if ( $desc_sheet !== '' ) {
+            $src = $desc_sheet;
         } else {
-            // Fallback to post_content (stripped of tags)
-            $src = wp_strip_all_tags( get_post_field( 'post_content', $pid, 'raw' ) );
+            $seo_desc_acf = function_exists('get_field') ? (string) get_field('seo_description', $pid) : '';
+            if ( $seo_desc_acf !== '' ) {
+                $src = $seo_desc_acf;
+            } else {
+                // Fallback to post_content (stripped of tags)
+                $src = wp_strip_all_tags( get_post_field( 'post_content', $pid, 'raw' ) );
+            }
         }
         return trim( wp_strip_all_tags( html_entity_decode( (string) $src ) ) );
     }
 
-    private function write_item(\XMLWriter $x, XmlHelper $h, \WC_Product $p): bool {
+    private function write_item(\XMLWriter $x, XmlHelper $h, \WC_Product $p, array $sheet_row = []): bool {
         $pid = $p->get_id();
         
         // PRODUCTNAME: ACF seo_title with fallback to product name
@@ -244,7 +284,7 @@ class FeedBuilder {
 
         $x->startElement( 'SHOPITEM' );
             $h->element_text( 'PRODUCTNAME', $name );
-            $h->element_text( 'DESCRIPTION', $this->description( $p ) );
+            $h->element_text( 'DESCRIPTION', $this->description( $p, $sheet_row ) );
             $h->element_text( 'URL', $url );
             $h->element_text( 'PRICE_VAT', (string) $price );
             $h->element_text( 'PRICE_BEFORE_DISCOUNT', (string) $price_before );

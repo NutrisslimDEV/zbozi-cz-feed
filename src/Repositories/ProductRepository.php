@@ -169,7 +169,8 @@ class ProductRepository {
 
             $product = wc_get_product( (int) $pid );
             if ( $product instanceof \WC_Product ) {
-                yield $product;
+                // Yield both product and sheet row data
+                yield [ 'product' => $product, 'sheet_row' => $row ];
             }
         }
     }
