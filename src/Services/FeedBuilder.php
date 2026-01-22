@@ -99,7 +99,14 @@ class FeedBuilder {
     }
 
 
-    private function category_text(\WC_Product $p): string {
+    private function category_text(\WC_Product $p, array $sheet_row = []): string {
+        // First check for CATEGORYTEXT in sheet
+        $cat_text_sheet = $this->row_get( $sheet_row, [ 'CATEGORYTEXT', 'CategoryText', 'categorytext' ] );
+        if ( $cat_text_sheet !== '' ) {
+            return trim( (string) $cat_text_sheet );
+        }
+
+        // Fallback to WooCommerce category chain
         $sep = (string) ( $this->opts['category_separator'] ?? ' | ' );
 
         $terms = get_the_terms( $p->get_id(), 'product_cat' );
@@ -267,6 +274,137 @@ class FeedBuilder {
         return trim( wp_strip_all_tags( html_entity_decode( (string) $src ) ) );
     }
 
+    /**
+     * Get delivery data from WooCommerce shipping settings.
+     * Returns array with delivery_id, delivery_price (excl tax), delivery_price_cod (incl tax).
+     * Uses free shipping if product price >= threshold, otherwise uses flat rate.
+     */
+    private function get_delivery_data(\WC_Product $p): ?array {
+        // Get product price with VAT
+        $product_price = $this->price_vat_integer( $p );
+        
+        // Get all shipping zones
+        $zones = \WC_Shipping_Zones::get_zones();
+        $free_shipping_method = null;
+        $flat_rate_method = null;
+        $free_shipping_threshold = null;
+        $flat_rate_cost = null;
+        
+        // Find free shipping and flat rate methods in all zones
+        foreach ( $zones as $zone_data ) {
+            $zone = \WC_Shipping_Zones::get_zone( $zone_data['id'] );
+            if ( ! $zone ) {
+                continue;
+            }
+            $methods = $zone->get_shipping_methods( true );
+            
+            foreach ( $methods as $method ) {
+                if ( $method->id === 'free_shipping' && $free_shipping_method === null ) {
+                    $free_shipping_method = $method;
+                    $min_amount = $method->get_option( 'min_amount' );
+                    if ( $min_amount !== '' ) {
+                        $free_shipping_threshold = (float) $min_amount;
+                    }
+                }
+                if ( $method->id === 'flat_rate' && $flat_rate_method === null ) {
+                    $flat_rate_method = $method;
+                    $cost = $method->get_option( 'cost' );
+                    if ( $cost !== '' ) {
+                        $flat_rate_cost = (float) $cost;
+                    }
+                }
+            }
+        }
+        
+        // Also check the "Rest of the World" zone (zone ID 0)
+        $rest_of_world_zone = \WC_Shipping_Zones::get_zone( 0 );
+        if ( $rest_of_world_zone ) {
+            $methods = $rest_of_world_zone->get_shipping_methods( true );
+            foreach ( $methods as $method ) {
+                if ( $method->id === 'free_shipping' && $free_shipping_method === null ) {
+                    $free_shipping_method = $method;
+                    $min_amount = $method->get_option( 'min_amount' );
+                    if ( $min_amount !== '' ) {
+                        $free_shipping_threshold = (float) $min_amount;
+                    }
+                }
+                if ( $method->id === 'flat_rate' && $flat_rate_method === null ) {
+                    $flat_rate_method = $method;
+                    $cost = $method->get_option( 'cost' );
+                    if ( $cost !== '' ) {
+                        $flat_rate_cost = (float) $cost;
+                    }
+                }
+            }
+        }
+        
+        // Determine which shipping method to use
+        $use_free_shipping = false;
+        $shipping_method = null;
+        $shipping_cost = 0.0;
+        
+        if ( $free_shipping_threshold !== null && $product_price >= $free_shipping_threshold ) {
+            $use_free_shipping = true;
+            $shipping_method = $free_shipping_method;
+            $shipping_cost = 0.0;
+        } else {
+            // Use flat rate (default if free shipping threshold not met or not set)
+            $shipping_method = $flat_rate_method;
+            $shipping_cost = $flat_rate_cost ?? 0.0;
+        }
+        
+        // If no shipping method found, return null
+        if ( $shipping_method === null ) {
+            return null;
+        }
+        
+        // Get shipping method title/label for DELIVERY_ID
+        $delivery_id = $shipping_method->get_title();
+        if ( empty( $delivery_id ) ) {
+            $delivery_id = $shipping_method->get_method_title();
+        }
+        if ( empty( $delivery_id ) ) {
+            $delivery_id = $use_free_shipping ? 'FREE_SHIPPING' : 'FLAT_RATE';
+        }
+        
+        // Sanitize delivery_id (remove special chars, convert to uppercase with underscores)
+        $delivery_id = strtoupper( preg_replace( '/[^a-zA-Z0-9_]/', '_', $delivery_id ) );
+        
+        // Calculate shipping prices with/without tax
+        $delivery_price = $shipping_cost; // Price excluding tax
+        $delivery_price_cod = $shipping_cost; // Price including tax (default same if no tax)
+        
+        // Calculate tax for shipping if shipping is taxable
+        if ( $shipping_cost > 0 && wc_shipping_enabled() ) {
+            // Default to Czechia for tax calculation
+            $country = strtoupper( (string) ( $this->opts['feed_country'] ?? 'CZ' ) );
+            
+            // Get shipping tax class (usually empty/default)
+            $shipping_tax_class = get_option( 'woocommerce_shipping_tax_class' );
+            
+            // Get tax rates for shipping
+            $rates = \WC_Tax::find_rates( [
+                'country'   => $country,
+                'state'     => '',
+                'postcode'  => '',
+                'city'      => '',
+                'tax_class' => $shipping_tax_class === 'inherit' ? '' : ( $shipping_tax_class ?: '' ),
+            ] );
+            
+            // Calculate shipping price with tax
+            if ( ! empty( $rates ) ) {
+                $taxes = \WC_Tax::calc_tax( $delivery_price, $rates, false );
+                $delivery_price_cod = $delivery_price + array_sum( $taxes );
+            }
+        }
+        
+        return [
+            'delivery_id' => $delivery_id,
+            'delivery_price' => $this->round_mode( $delivery_price ),
+            'delivery_price_cod' => $this->round_mode( $delivery_price_cod ),
+        ];
+    }
+
     private function write_item(\XMLWriter $x, XmlHelper $h, \WC_Product $p, array $sheet_row = []): bool {
         $pid = $p->get_id();
         
@@ -279,7 +417,7 @@ class FeedBuilder {
         $price  = $this->price_vat_integer( $p );  // PRICE_VAT (CZK, incl VAT) as integer
         $img    = $this->main_image( $p );
         $itemId = $this->item_id( $p );  // Product ID
-        $catTxt = $this->category_text( $p );
+        $catTxt = $this->category_text( $p, $sheet_row );
         $gtin   = $this->get_gtin( $p, $sheet_row );
         $price_before = $this->regular_price_vat_integer( $p );  // PRICE_BEFORE_DISCOUNT
 
@@ -302,6 +440,16 @@ class FeedBuilder {
                 $h->element_text( 'EAN', $gtin );
             }
             $h->element_text( 'CATEGORYTEXT', $catTxt );
+            
+            // Add DELIVERY section
+            $delivery_data = $this->get_delivery_data( $p );
+            if ( $delivery_data !== null ) {
+                $x->startElement( 'DELIVERY' );
+                    $h->element_text( 'DELIVERY_ID', $delivery_data['delivery_id'] );
+                    $h->element_text( 'DELIVERY_PRICE', (string) $delivery_data['delivery_price'] );
+                    $h->element_text( 'DELIVERY_PRICE_COD', (string) $delivery_data['delivery_price_cod'] );
+                $x->endElement(); // DELIVERY
+            }
         $x->endElement(); // SHOPITEM
 
         return true;
